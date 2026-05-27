@@ -86,12 +86,12 @@ def _resolver(cap_tecido=None, mod_mo=None, veludo_reembolsavel=True, permite_ex
 
     for p in ITEMS:
         limite_normal = DEMANDA_MAX.get(p, solver.infinity())
-        x[p] = solver.NumVar(0, limite_normal, f"x_{p}")
+        x[p] = solver.NumVar(0, limite_normal, "x_{}".format(p))
         
         if permite_excesso_nov and p in DEMANDA_MAX:
-            x_excesso[p] = solver.NumVar(0, solver.infinity(), f"x_excesso_{p}")
+            x_excesso[p] = solver.NumVar(0, solver.infinity(), "x_excesso_{}".format(p))
         else:
-            x_excesso[p] = solver.NumVar(0, 0, f"x_excesso_{p}")
+            x_excesso[p] = solver.NumVar(0, 0, "x_excesso_{}".format(p))
 
     # Total de cada peça produzida
     prod = {p: x[p] + x_excesso[p] for p in ITEMS}

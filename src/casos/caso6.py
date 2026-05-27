@@ -53,7 +53,7 @@ def _resolver(
     # Variáveis de decisão: x[i][j] = número de pessoas na região i da faixa j
     x = [
         [
-            solver.NumVar(0, solver.infinity(), f"x[{i},{j}]")
+            solver.NumVar(0, solver.infinity(), "x[{},{}]".format(i, j))
             for j in range(n_f)
         ]
         for i in range(n_r)
@@ -107,7 +107,7 @@ def _resolver(
 
 def _exibir_tabela(res):
     """Exibe o plano de amostragem formatado em matriz."""
-    cabecalho = "{:<16}".format("") + "".join(f"{f:>12}" for f in FAIXAS)
+    cabecalho = "{:<16}".format("") + "".join("{:>12}".format(f) for f in FAIXAS)
     print(cabecalho)
     for i, reg in enumerate(REGIOES):
         linha = "{:<16}".format(reg)
@@ -165,7 +165,12 @@ def executar():
         print("  Modelo sem solução viável.")
 
     # --- P6: Proporções Populacionais Fixas Rigorosas ---
-    r6 = _resolver(usar_percentuais_fixos=True)
+    r6 = _resolver(
+    custos=CUSTOS_ATUALIZADOS,
+    min_por_celula=50,
+    usar_percentuais_fixos=True,
+    )
+    
     print("\n[P6] Restrições Rígidas de Proporção Populacional Estrita")
     if r6:
         print("  Custo com Proporção Fixa: ${:,.2f}".format(r6["custo"]))

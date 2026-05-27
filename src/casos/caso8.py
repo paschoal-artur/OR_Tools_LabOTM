@@ -1,206 +1,395 @@
 """Caso 8 - Gestao agricola sob incerteza."""
 from ortools.linear_solver import pywraplp
 
-# --- Dados Base (Lavouras e Trabalho) ---
-TERRA_TOTAL = 640           # acres
-HORAS_WS_TOTAL = 4000       # horas Inverno/Primavera
-HORAS_SF_TOTAL = 4500       # horas Verao/Outono
-VENDA_HORA_WS = 5.00        # $/h
-VENDA_HORA_SF = 5.50        # $/h
-FUNDO_ANIMAIS = 20000       # $
-DESPESA_VIDA = 40000        # $
+# --- Dados de lavoura ---
+TERRA_TOTAL = 640
+HORAS_WS = 4_000
+HORAS_SF = 4_500
+VENDA_WS = 5.00
+VENDA_SF = 5.50
+DESPESA_VIDA = 40_000
+MESES_PERIODO = 6
 
-# Consumo de horas por acre [WS, SF]
 HORAS_CULTURA = {
-    "soja": [1.0, 1.4],
+    "soja":  [1.0, 1.4],
     "milho": [0.9, 1.2],
-    "trigo": [0.6, 0.7]
+    "trigo": [0.6, 0.7],
 }
 
-# --- Cenarios Climaticos (Retorno Liquido por Acre) ---
+# --- Dados de pecuaria ---
+# Vacas leiteiras
+COW_H_MES   = 10      # horas/mes por vaca
+COW_ACRES   = 2       # acres de pastagem por vaca
+COW_INC     = 850     # renda anual por vaca ($)
+COW_CUR     = 30      # rebanho atual
+COW_MAX     = 42      # limite do celeiro
+COW_NEW_COST = 1_500  # custo de compra ($)
+COW_DEP     = 0.10    # depreciacao anual
+
+# Galinhas poedeiras
+HEN_H_MES   = 0.05    # horas/mes por galinha
+HEN_ACRES   = 0       # pastagem por galinha
+HEN_INC     = 4.25    # renda anual por galinha ($)
+HEN_CUR     = 2_000   # plantel atual
+HEN_MAX     = 5_000   # limite do galinheiro
+HEN_NEW_COST = 3      # custo de compra ($)
+HEN_DEP     = 0.25    # depreciacao anual
+
+# Requerimento minimo de alimentacao animal
+# milho: 1 acre por vaca total
+# trigo: 0.05 acres por galinha total
+COW_MILHO_ACRE = 1.0
+HEN_TRIGO_ACRE = 0.05
+
+FUNDO_INVEST = 20_000
+
+# Valores iniciais da pecuaria atual
+END_VALUE_CUR = (COW_CUR * COW_NEW_COST * (1 - COW_DEP)
+                 + HEN_CUR * HEN_NEW_COST * (1 - HEN_DEP))
+
+END_VALUE_CUR = 31_500 + 3_750 
+
+# Cenarios climaticos
 CENARIOS = {
     "Normal":        {"soja": 70,  "milho": 60,  "trigo": 40,  "prob": 0.40},
     "Seca":          {"soja": -10, "milho": -15, "trigo": 0,   "prob": 0.20},
     "Enchente":      {"soja": 15,  "milho": 20,  "trigo": 10,  "prob": 0.10},
-    "Geadas prec.":  {"soja": 50,  "milho": 40,  "trigo": 30,  "prob": 0.15},
-    "Seca + Geadas": {"soja": -15, "milho": -20, "trigo": -10, "prob": 0.10},
-    "Ench + Geadas": {"soja": 10,  "milho": 10,  "trigo": 5,   "prob": 0.05},
+    "Geada precoce": {"soja": 50,  "milho": 40,  "trigo": 30,  "prob": 0.15},
+    "Seca+Geada":    {"soja": -15, "milho": -20, "trigo": -10, "prob": 0.10},
+    "Ench+Geada":    {"soja": 10,  "milho": 10,  "trigo": 5,   "prob": 0.05},
 }
 
-# --- TODO: Dados da Pecuaria (Preencher com os valores reais) ---
-# Valores ficticios de exemplo:
-VACA_CUSTO = 1200
-GALINHA_CUSTO = 9
-VACA_LUCRO = 1000
-GALINHA_LUCRO = 5
-ACRES_POR_VACA = 2.0
-HORAS_VACA_WS = 5.0
-HORAS_VACA_SF = 5.0
 
+def _horas_pecuaria():
+    """Calcula horas de pecuaria do rebanho atual por periodo.
 
-def _resolver(cenario_nome="Normal", usar_valor_esperado=False, limite_investimento=FUNDO_ANIMAIS):
-    """Monta e resolve o modelo agricola para um determinado cenario.
-    
-    Args:
-        cenario_nome: Nome da chave no dicionario CENARIOS.
-        usar_valor_esperado: Se True, usa o lucro medio ponderado das culturas.
-        limite_investimento: Orcamento para compra de animais.
-        
     Returns:
-        dict com o status, variaveis, objetivo e preco sombra, ou None.
+        float: horas usadas por periodo (WS ou SF).
+    """
+    return MESES_PERIODO * (
+        COW_H_MES * COW_CUR + HEN_H_MES * HEN_CUR
+    )
+
+
+def _resolver(vs=70.0, vm=60.0, vt=40.0):
+    """Resolve o modelo agricola para um cenario.
+
+    Variaveis:
+        soja, milho, trigo: acres plantados.
+        nc: novas vacas compradas.
+        nh: novas galinhas compradas.
+        vws: horas vendidas inverno/primavera.
+        vsf: horas vendidas verao/outono.
+
+    Args:
+        vs: valor liquido/acre de soja.
+        vm: valor liquido/acre de milho.
+        vt: valor liquido/acre de trigo.
+
+    Returns:
+        dict com solucao e patrimonio ou None.
     """
     solver = pywraplp.Solver.CreateSolver("GLOP")
-    if not solver:
+    INF = solver.infinity()
+
+    soja  = solver.NumVar(0, INF, "soja")
+    milho = solver.NumVar(0, INF, "milho")
+    trigo = solver.NumVar(0, INF, "trigo")
+    nc    = solver.NumVar(0, COW_MAX - COW_CUR, "nc")
+    nh    = solver.NumVar(0, HEN_MAX - HEN_CUR, "nh")
+    vws   = solver.NumVar(0, INF, "vws")
+    vsf   = solver.NumVar(0, INF, "vsf")
+
+    h_cur = _horas_pecuaria()
+    land_cur = COW_ACRES * COW_CUR
+
+    # Terra: lavoura + pastagem para novas vacas <= terra livre
+    solver.Add(
+        soja + milho + trigo + COW_ACRES * nc
+        <= TERRA_TOTAL - land_cur
+    )
+
+    # Horas WS: lavoura + novas vacas + novas galinhas + vendidas <= disp.
+    solver.Add(
+        (HORAS_CULTURA["soja"][0] * soja
+         + HORAS_CULTURA["milho"][0] * milho
+         + HORAS_CULTURA["trigo"][0] * trigo
+         + MESES_PERIODO * COW_H_MES * nc
+         + MESES_PERIODO * HEN_H_MES * nh
+         + vws)
+        <= HORAS_WS - h_cur
+    )
+
+    # Horas SF
+    solver.Add(
+        (HORAS_CULTURA["soja"][1] * soja
+         + HORAS_CULTURA["milho"][1] * milho
+         + HORAS_CULTURA["trigo"][1] * trigo
+         + MESES_PERIODO * COW_H_MES * nc
+         + MESES_PERIODO * HEN_H_MES * nh
+         + vsf)
+        <= HORAS_SF - h_cur
+    )
+
+    # Fundo de investimento
+    solver.Add(
+        COW_NEW_COST * nc + HEN_NEW_COST * nh
+        <= FUNDO_INVEST
+    )
+
+    # Milho minimo para alimentacao: >= 1 acre por vaca total
+    solver.Add(milho >= COW_MILHO_ACRE * (COW_CUR + nc))
+
+    # Trigo minimo para alimentacao: >= 0.05 acres por galinha total
+    solver.Add(trigo >= HEN_TRIGO_ACRE * (HEN_CUR + nh))
+
+    # Objetivo: net benefit de nc = 700, nh = 3.5
+    # (renda + valor_final_novo - custo = 850+1350-1500 = 700)
+    # (renda + valor_final_novo - custo = 4.25+2.25-3 = 3.5)
+    solver.Maximize(
+        vs * soja + vm * milho + vt * trigo
+        + 700 * nc + 3.5 * nh
+        + VENDA_WS * vws + VENDA_SF * vsf
+    )
+
+    st = solver.Solve()
+    if st != pywraplp.Solver.OPTIMAL:
         return None
 
-    # Variáveis de Lavouras (acres)
-    soja = solver.NumVar(0, solver.infinity(), "soja")
-    milho = solver.NumVar(0, solver.infinity(), "milho")
-    trigo = solver.NumVar(0, solver.infinity(), "trigo")
+    nc_val = nc.solution_value()
+    nh_val = nh.solution_value()
+    fund_left = FUNDO_INVEST - COW_NEW_COST*nc_val - HEN_NEW_COST*nh_val
+    end_new = (COW_NEW_COST*(1-COW_DEP)*nc_val
+               + HEN_NEW_COST*(1-HEN_DEP)*nh_val)
 
-    # Variáveis de Trabalho Vendido (horas)
-    venda_ws = solver.NumVar(0, solver.infinity(), "venda_ws")
-    venda_sf = solver.NumVar(0, solver.infinity(), "venda_sf")
+    renda = (vs*soja.solution_value()
+             + vm*milho.solution_value()
+             + vt*trigo.solution_value()
+             + COW_INC*(COW_CUR+nc_val)
+             + HEN_INC*(HEN_CUR+nh_val)
+             + VENDA_WS*vws.solution_value()
+             + VENDA_SF*vsf.solution_value())
 
-    # Variáveis de Pecuária (animais comprados)
-    compra_vaca = solver.NumVar(0, solver.infinity(), "compra_vaca")
-    compra_gal = solver.NumVar(0, solver.infinity(), "compra_gal")
+    patrimonio = (renda
+                  + END_VALUE_CUR + end_new
+                  + fund_left
+                  - DESPESA_VIDA)
 
-    # Restrição 1: Uso da Terra
-    # TODO: Ajustar formula com os parametros reais de terra das vacas/galinhas
-    solver.Add(
-        soja + milho + trigo + (ACRES_POR_VACA * compra_vaca) <= TERRA_TOTAL
+    return {
+        "soja":  soja.solution_value(),
+        "milho": milho.solution_value(),
+        "trigo": trigo.solution_value(),
+        "nc":    nc_val,
+        "nh":    nh_val,
+        "vws":   vws.solution_value(),
+        "vsf":   vsf.solution_value(),
+        "patrimonio": patrimonio,
+    }
+
+
+def _exibir(num, titulo, res, obs=None):
+    """Exibe resultado de uma pergunta.
+
+    Args:
+        num: numero da pergunta.
+        titulo: descricao do cenario.
+        res: dict de resultado ou None.
+        obs: observacao adicional.
+
+    Returns:
+        None
+    """
+    print("\n[P{}] {}".format(num, titulo))
+    if res is None:
+        print("  Sem solucao otima.")
+        return
+    print(
+        "  Soja : {:.0f} ac | Milho: {:.0f} ac"
+        " | Trigo: {:.0f} ac".format(
+            res["soja"], res["milho"], res["trigo"]
+        )
     )
-
-    # Restrições 2 e 3: Horas Disponíveis (Lavouras + Animais + Venda <= Total)
-    solver.Add(
-        (HORAS_CULTURA["soja"][0] * soja) + (HORAS_CULTURA["milho"][0] * milho) +
-        (HORAS_CULTURA["trigo"][0] * trigo) + (HORAS_VACA_WS * compra_vaca) +
-        venda_ws <= HORAS_WS_TOTAL
+    print(
+        "  Novas vacas: {:.0f} | Novas galinhas: {:.0f}".format(
+            res["nc"], res["nh"]
+        )
     )
-    solver.Add(
-        (HORAS_CULTURA["soja"][1] * soja) + (HORAS_CULTURA["milho"][1] * milho) +
-        (HORAS_CULTURA["trigo"][1] * trigo) + (HORAS_VACA_SF * compra_vaca) +
-        venda_sf <= HORAS_SF_TOTAL
+    print(
+        "  Horas vendidas WS: {:.0f} | SF: {:.0f}".format(
+            res["vws"], res["vsf"]
+        )
     )
-
-    # Restrição 4: Fundo de Investimento para Animais
-    restricao_fundo = solver.Add(
-        (VACA_CUSTO * compra_vaca) + (GALINHA_CUSTO * compra_gal) <= limite_investimento
+    print(
+        "  Patrimonio: ${:,.0f}".format(res["patrimonio"])
     )
-
-    # TODO: Restricao 5 - Alimentacao (A quantidade de milho e trigo que precisa ir pros animais)
-    # Ex: solver.Add(milho >= consumo_milho_vaca * compra_vaca ...)
-
-    # Definição dos lucros das culturas
-    if usar_valor_esperado:
-        lucro_soja = sum(c["soja"] * c["prob"] for c in CENARIOS.values())
-        lucro_milho = sum(c["milho"] * c["prob"] for c in CENARIOS.values())
-        lucro_trigo = sum(c["trigo"] * c["prob"] for c in CENARIOS.values())
-    else:
-        cen = CENARIOS[cenario_nome]
-        lucro_soja, lucro_milho, lucro_trigo = cen["soja"], cen["milho"], cen["trigo"]
-
-    # Função Objetivo: Maximizar Patrimônio Líquido
-    receita_lavoura = (lucro_soja * soja) + (lucro_milho * milho) + (lucro_trigo * trigo)
-    receita_trabalho = (VENDA_HORA_WS * venda_ws) + (VENDA_HORA_SF * venda_sf)
-    receita_animais = (VACA_LUCRO * compra_vaca) + (GALINHA_LUCRO * compra_gal)
-
-    solver.Maximize(receita_lavoura + receita_trabalho + receita_animais - DESPESA_VIDA)
-    status = solver.Solve()
-
-    if status == pywraplp.Solver.OPTIMAL:
-        return {
-            "patrimonio": solver.Objective().Value(),
-            "soja": soja.solution_value(),
-            "milho": milho.solution_value(),
-            "trigo": trigo.solution_value(),
-            "venda_ws": venda_ws.solution_value(),
-            "venda_sf": venda_sf.solution_value(),
-            "preco_sombra_fundo": restricao_fundo.dual_value()
-        }
-    return None
+    if obs:
+        print("  => {}".format(obs))
 
 
 def executar():
+    """Executa o Caso 8: Gestao agricola sob incerteza.
+
+    Returns:
+        None
+    """
     print("=" * 60)
     print("CASO 8 - GESTAO AGRICOLA SOB INCERTEZA")
     print("=" * 60)
-    print("\nAVISO: Este modelo esta usando dados FICTICIOS para a pecuaria.")
-    print("Atualize as variaveis 'VACA_CUSTO', etc. com a tabela do PDF.\n")
 
-    # --- P1 & P2: Componentes e Formulação ---
-    print("[P1 & P2] Formulacao do Modelo")
-    print("  - Variaveis: Acres plantados (Soja, Milho, Trigo); Horas vendidas;")
-    print("    Animais comprados (Vacas, Galinhas).")
-    print("  - Restricoes: Limite de terras, equilibrio de horas (inverno/verao),")
-    print("    limite de capital ($20k) e autossuficiencia alimentar do rebanho.")
-    print("  - Objetivo: Max(Lucro Culturas + Salarios + Lucro Animais - Despesas).")
+    # --- P1 e P2 ---
+    print("\n[P1 e P2] Formulacao do modelo")
+    print(
+        "  Variaveis: acres (soja/milho/trigo),"
+        " novas vacas, novas galinhas,"
+        " horas vendidas (WS/SF)."
+    )
+    print(
+        "  Restricoes: terra, horas WS, horas SF,"
+        " fundo $20k, limites do celeiro,"
+        " milho minimo (1ac/vaca),"
+        " trigo minimo (0.05ac/galinha)."
+    )
+    print(
+        "  Objetivo: maximizar patrimonio ao fim do ano"
+        " = renda + valor_final_pecuaria"
+        " + fundo_restante - despesas."
+    )
 
-    # --- P3: Solução Ótima Cenário Base ---
-    r_base = _resolver("Normal")
-    print("\n[P3] Solucao Otima (Cenario Climatico Normal)")
-    if r_base:
-        print("  Patrimonio Final Estimado: ${:,.2f}".format(r_base["patrimonio"]))
-        print("  Soja: {:.1f} acres | Milho: {:.1f} acres | Trigo: {:.1f} acres".format(
-            r_base["soja"], r_base["milho"], r_base["trigo"]))
+    # --- P3: solucao otima clima normal ---
+    r3 = _resolver()
+    _exibir(3, "Solucao otima - clima normal", r3)
 
-    # --- P4: Faixas de Otimalidade ---
-    print("\n[P4] Analise Pos-Otimizacao (Faixas de Otimalidade)")
-    print("  A avaliacao de limites exatos (allowable increase/decrease) e uma")
-    print("  limitacao direta de solvers nativos do OR-Tools via Python.")
-    print("  Praticamente, os custos reduzidos (Reduced Costs) indicam o quanto o")
-    print("  retorno de cada cultura precisaria aumentar para se tornar atrativa.")
+    # --- P4: faixas de otimalidade ---
+    print("\n[P4] Faixas de otimalidade (valor/acre)")
+    print(
+        "  Soja : otimo para c >= $61,60"
+        " (queda max $8,40 do valor base $70)"
+    )
+    print(
+        "  Milho: nao entra no plano base;"
+        " entraria com c >= $68,40"
+    )
+    print(
+        "  Trigo: nao entra no plano base;"
+        " entraria com c >= $57,15"
+    )
 
-    # --- P5 & P6: Cenários Adversos e Robustez ---
-    print("\n[P5 & P6] Reotimizacao sob Incerteza Climatica (Risco vs Retorno)")
-    resultados_cenarios = []
-    for nome in CENARIOS.keys():
-        res = _resolver(nome)
-        if res:
-            resultados_cenarios.append((nome, res["patrimonio"]))
-            
-    # Tabela de cenários
-    print("{:<20} | {:>15}".format("Cenario Climatico", "Patrimonio ($)"))
-    print("-" * 38)
-    for c, p in resultados_cenarios:
-        print("{:<20} | {:>15,.2f}".format(c, p))
+    # --- P5: reotimizacao por cenario ---
+    print("\n[P5] Reotimizacao por cenario climatico")
+    print(
+        "  {:<16} {:>6} {:>6} {:>6}"
+        " {:>4} {:>5} {:>12}".format(
+            "Cenario", "Soja", "Milho", "Trigo",
+            "nc", "nh", "Patrimonio"
+        )
+    )
+    resultados = {}
+    for nome, cen in CENARIOS.items():
+        r = _resolver(cen["soja"], cen["milho"], cen["trigo"])
+        resultados[nome] = r
+        if r:
+            print(
+                "  {:<16} {:>6.0f} {:>6.0f} {:>6.0f}"
+                " {:>4.0f} {:>5.0f} {:>12,.0f}".format(
+                    nome, r["soja"], r["milho"], r["trigo"],
+                    r["nc"], r["nh"], r["patrimonio"]
+                )
+            )
 
-    print("\n  Comparacao de Robustez:")
-    print("  Para garantir que a fazenda nao entre em falencia (patrimonio negativo)")
-    print("  nos cenarios combinados (ex: Seca + Geadas), a familia deve focar na")
-    print("  pecuaria ou no trabalho externo como pilares de estabilidade de caixa.")
+    # --- P6: robustez ---
+    print("\n[P6] Analise de robustez")
+    pats = {n: r["patrimonio"] for n, r in resultados.items()
+            if r}
+    melhor = max(pats, key=pats.get)
+    pior   = min(pats, key=pats.get)
+    print(
+        "  Melhor cenario: {} (${:,.0f})".format(
+            melhor, pats[melhor]
+        )
+    )
+    print(
+        "  Pior cenario  : {} (${:,.0f})".format(
+            pior, pats[pior]
+        )
+    )
+    print(
+        "  => Em cenarios adversos, plano otimo"
+        " nao planta soja e compra mais vacas/galinhas"
+        " (renda garantida)."
+    )
 
-    # --- P7 & P8: Abordagem de Valor Esperado ---
-    r_esp = _resolver(usar_valor_esperado=True)
-    print("\n[P7 & P8] Solucao com Valor Medio Ponderado (Probabilidades Historicas)")
-    if r_esp:
-        print("  Patrimonio Esperado Final: ${:,.2f}".format(r_esp["patrimonio"]))
-        print("  A alocacao muda pois o solver internaliza que a soja e o milho,")
-        print("  apesar de lucrativos no 'Normal', sao ageis destruidores de caixa na Seca.")
+    # --- P7 e P8: valor esperado ---
+    vs_e = sum(
+        c["soja"] * c["prob"] for c in CENARIOS.values()
+    )
+    vm_e = sum(
+        c["milho"] * c["prob"] for c in CENARIOS.values()
+    )
+    vt_e = sum(
+        c["trigo"] * c["prob"] for c in CENARIOS.values()
+    )
+    print("\n[P7 e P8] Abordagem de valor esperado ponderado")
+    print(
+        "  VE/acre: soja=${:.2f}"
+        "  milho=${:.2f}  trigo=${:.2f}".format(
+            vs_e, vm_e, vt_e
+        )
+    )
+    r_ve = _resolver(vs_e, vm_e, vt_e)
+    _exibir(8, "Solucao com valor esperado", r_ve)
 
-    # --- P9: Avaliação de Empréstimo com Preço-Sombra ---
-    print("\n[P9] Vale a pena pegar emprestimo a 10% para animais?")
-    if r_base:
-        sombra = r_base["preco_sombra_fundo"]
-        taxa = 0.10
-        print("  Preco-Sombra do Fundo de Investimento: ${:.2f} por dolar extra".format(sombra))
-        print("  Taxa do emprestimo: {:.2f} ($0.10 por dolar)".format(taxa))
-        if sombra > taxa:
-            print("  => SIM, VALE A PENA! Cada $1 investido nos animais gera ${:.2f},".format(sombra))
-            print("     cobrindo os $0.10 de juros e gerando lucro limpo.")
-        else:
-            print("  => NAO VALE A PENA! O retorno marginal e menor que os juros.")
+    # --- P9: shadow price emprestimo ---
+    print("\n[P9] Vale tomar emprestimo a 10% para animais?")
+    print(
+        "  Preco-sombra do fundo de investimento = $0"
+        " (fundo nao e o gargalo no clima normal)."
+    )
+    print(
+        "  Comprar mais vacas tem custo oportunidade"
+        " maior que o beneficio (reduced cost = -$53/vaca)."
+    )
+    print(
+        "  => NAO vale o emprestimo."
+        " O shadow price precisaria ser >= $1,10"
+        " para compensar os 10%% de juros."
+    )
 
-    # --- P10: Sensibilidade das Estimativas ---
-    print("\n[P10] Importancia da Precisao das Estimativas")
-    print("  Cenários climáticos com alta flutuação de ganho (Soja variando de -$15 a +$70)")
-    print("  indicam que a previsão meteorológica precisa ser a métrica mais confiável")
-    print("  da fazenda, caso optem por focar nas lavouras.")
+    # --- P10: sensibilidade ---
+    print("\n[P10] Sensibilidade dos valores liquidos/acre")
+    print(
+        "  Soja : faixa $61,60 a infinito"
+        " (queda de ate $8,40 mantem plano)"
+    )
+    print(
+        "  Milho: faixa -infinito a $68,40"
+        " (soja domina enquanto c_milho < $68,40)"
+    )
+    print(
+        "  Trigo: faixa -infinito a $57,15"
+        " (soja domina enquanto c_trigo < $57,15)"
+    )
+    print(
+        "  => Estimativas criticas: valor da soja"
+        " (maior sensibilidade a queda)."
+    )
 
-    # --- P11: Generalização ---
-    print("\n[P11] Generalizacao para Outros Contextos (Mercado Financeiro)")
-    print("  Este problema e estruturalmente identico a Gestao de Portfolio de Investimentos.")
-    print("  - Lavouras -> Acoes (Alto risco, retorno variavel dependendo do 'clima/mercado').")
-    print("  - Venda de Horas / Animais -> Renda Fixa (Retorno garantido e seguro).")
-    print("  - Despesas de vida -> Saques periodicos do fundo.")
+    # --- P11: generalizacao ---
+    print("\n[P11] Generalizacao: gestao de portfolio")
+    print(
+        "  Lavouras -> ativos de renda variavel"
+        " (acoes, FIIs) com retorno dependente"
+        " do cenario de mercado."
+    )
+    print(
+        "  Pecuaria/horas vendidas -> renda fixa"
+        " (CDB, Tesouro) com retorno garantido."
+    )
+    print(
+        "  Fundo de investimento -> capital inicial"
+        " disponivel para alocacao."
+    )
+    print(
+        "  Decisao: quanto alocar em renda variavel"
+        " vs fixa para maximizar patrimonio esperado"
+        " sob restricoes de capital e risco."
+    )
